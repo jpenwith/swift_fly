@@ -9,12 +9,15 @@ let package = Package(
     dependencies: [
         // 💧 A server-side Swift web framework.
         .package(url: "https://github.com/vapor/vapor.git", from: "4.89.0"),
+        .package(path: "/Users/me/Downloads/MediaToolSwift"),
+//        .package(url: "https://github.com/starkdmi/MediaToolSwift.git", .upToNextMajor(from: "1.1.2"))
     ],
     targets: [
         .executableTarget(
             name: "App",
             dependencies: [
                 .product(name: "Vapor", package: "vapor"),
+                .product(name: "MediaToolSwift", package: "MediaToolSwift"),
             ]
         ),
         .testTarget(name: "AppTests", dependencies: [

@@ -11,8 +11,9 @@ import MediaToolSwift
 import UniformTypeIdentifiers
 import Vapor
 
-
 struct ImageController: RouteCollection {
+    let directoryManager: DirectoryManager
+
     func boot(routes: Vapor.RoutesBuilder) throws {
         routes.on(.GET, use: `get`)
     }
@@ -20,7 +21,7 @@ struct ImageController: RouteCollection {
 
 extension ImageController {
     func get(_ request: Request) async throws -> Response {
-        let action = Action(request: request)
+        let action = Action(request: request, directoryManager: directoryManager)
 
         return try await action.response
     }
@@ -29,6 +30,7 @@ extension ImageController {
 extension ImageController {
     struct Action {
         let request: Request
+        let directoryManager: DirectoryManager
         
         var response: Response {
             get async throws {
@@ -55,7 +57,7 @@ extension ImageController {
                 try await loadInputImage()
             }
 
-            let info = try ImageTool.convert(
+            _ = try ImageTool.convert(
                 source: inputFileURL,
                 destination: outputFileURL,
                 settings: .init(
@@ -73,14 +75,32 @@ extension ImageController {
 
 extension ImageController.Action {
     private func loadInputImage() async throws {
-        let imageRequest = ClientRequest(method: .GET, url: try query.input.url, headers: .init())
+        let query = try query
 
-        let imageResponse = try await request.client.send(imageRequest)
-        guard let imageResponseBody = imageResponse.body else {
-            throw Abort(.badRequest)
+        if query.input.url.hasPrefix("/") {
+            guard let filesDirectoryURL = directoryManager.filesDirectoryURL else {
+                throw Abort(.internalServerError)
+            }
+
+            let path = String(query.input.url.dropFirst())
+            let sourceFileURL = filesDirectoryURL.appendingPathComponent(path)
+
+            guard FileManager.default.fileExists(atPath: sourceFileURL.path) else {
+                throw Abort(.badRequest, reason: "File not found")
+            }
+
+            try FileManager.default.copyItem(at: sourceFileURL, to: try inputFileURL)
         }
+        else {
+            let imageRequest = ClientRequest(method: .GET, url: URI(string: query.input.url), headers: .init())
 
-        try await request.fileio.writeFile(imageResponseBody, at: try inputFileURL.path)
+            let imageResponse = try await request.client.send(imageRequest)
+            guard let imageResponseBody = imageResponse.body else {
+                throw Abort(.badRequest, reason: "File not found")
+            }
+
+            try await request.fileio.writeFile(imageResponseBody, at: inputFileURL.path)
+        }
     }
     
     private func respondWithOutputImage() async throws -> Response {
@@ -89,15 +109,14 @@ extension ImageController.Action {
     
     private var inputFileURL: URL {
         get throws {
-            let workingDirectoryURL = URL(filePath: request.application.directory.workingDirectory, directoryHint: .isDirectory)
+            let query = try query
 
-            let inputFileURL = workingDirectoryURL
-                .appendingPathComponent("cache", conformingTo: .directory)
-                .appendingPathComponent("input", conformingTo: .directory)
-                .appendingPathComponent("images", conformingTo: .directory)
-                .appendingPathComponent(try query.input.digestString, conformingTo: try query.input.uti)
+            guard let inputFileUTI = query.input.uti ?? UTType(filenameExtension: (query.input.url as NSString).pathExtension, conformingTo: .data) else {
+                throw Abort(.badRequest)
+            }
 
-            try FileManager.default.createDirectory(at: inputFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let inputFileURL = directoryManager.imagesInputCacheDirectoryURL
+                .appendingPathComponent(query.input.digestString, conformingTo: inputFileUTI)
 
             return inputFileURL
         }
@@ -105,16 +124,9 @@ extension ImageController.Action {
     
     private var outputFileURL: URL {
         get throws {
-            let workingDirectoryURL = URL(filePath: request.application.directory.workingDirectory, directoryHint: .isDirectory)
-
-            let outputFileURL = workingDirectoryURL
-                .appendingPathComponent("cache", conformingTo: .directory)
-                .appendingPathComponent("output", conformingTo: .directory)
-                .appendingPathComponent("images", conformingTo: .directory)
+            let outputFileURL = directoryManager.imagesOutputCacheDirectoryURL
                 .appendingPathComponent(try query.digestString, conformingTo: try query.output.uti)
-            
-            try FileManager.default.createDirectory(at: outputFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            
+
             return outputFileURL
         }
     }
@@ -128,11 +140,11 @@ extension ImageController.Action {
         let output: Output
         
         struct Input: Content {
-            let url: URI
-            let uti: UTType
-            
+            let url: String
+            let uti: UTType?
+
             var digestString: String {
-                let stringToDigest = url.string
+                let stringToDigest = url
 
                 return SHA256.hash(data: stringToDigest.data(using: .utf8)!).compactMap { String(format: "%02x", $0) }.joined()
             }
